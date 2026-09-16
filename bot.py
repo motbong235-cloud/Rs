@@ -131,6 +131,9 @@ EMOJI_FILE = os.path.join(DATA_DIR, "premium_emoji.json")
 # QR ផ្ទាល់ខ្លួនដែល admin កំណត់ដោយដៃ (មិនមែន QR របស់ហាងមេ) រួច user ត្រូវផ្ញើវិក័យប័ត្រ/screenshot
 # មកឲ្យ admin ត្រួតពិនិត្យ + បញ្ចូលលុយឲ្យដោយដៃ (មិនមែន auto-detect ដូច Bakong ទេ)
 PAYMENT_CONFIG_FILE = os.path.join(DATA_DIR, "payment_config.json")
+NOTIFY_CONFIG_FILE = os.path.join(DATA_DIR, "notify_config.json")
+# រូបភាព Banner (ដូច DZ Store) — មួយសម្រាប់ស្វាគមន៍ (/start) មួយសម្រាប់បញ្ជីទំនិញ (ហាង)
+BANNER_CONFIG_FILE = os.path.join(DATA_DIR, "banner_config.json")
 PENDING_DEPOSITS_FILE = os.path.join(DATA_DIR, "pending_deposits.json")
 # ករណី product ប្រភេទ "email" (មិនមែនចែក account ពី stock file ទេ) — pending
 # រហូតដល់ admin ដាក់ Premium ចូល email របស់ user ដោយផ្ទាល់ រួចចុច 'រួចរាល់'
@@ -215,8 +218,16 @@ TR = {
         "en": "👋 Hello {name}! Welcome to {store}! 🎉",
         "zh": "👋 你好 {name}！欢迎来到 {store}！🎉",
     },
-    "account_info_header": {"km": "📋 <b>ព័ត៌មានគណនី</b>", "en": "📋 <b>Account Info</b>", "zh": "📋 <b>账号信息</b>"},
+    "start_name_line": {
+        "km": "👤 ឈ្មោះ: <b>{name}</b>",
+        "en": "👤 Name: <b>{name}</b>",
+        "zh": "👤 姓名：<b>{name}</b>",
+    },
+    "account_info_header": {"km": "🪪 <b>ព័ត៌មានគណនី</b>", "en": "🪪 <b>Account Info</b>", "zh": "🪪 <b>账号信息</b>"},
     "account_username_none": {"km": "—", "en": "—", "zh": "—"},
+    "account_stats_header": {"km": "📊 <b>ស្ថិតិហាង</b>", "en": "📊 <b>Store Stats</b>", "zh": "📊 <b>店铺统计</b>"},
+    "orders_total_word": {"km": "ការបញ្ជាទិញសរុប", "en": "Total Orders", "zh": "总订单数"},
+    "users_total_word": {"km": "អ្នកប្រើប្រាស់សរុប", "en": "Total Users", "zh": "总用户数"},
     "features_header": {"km": "📖 <b>មុខងារ</b>", "en": "📖 <b>Features</b>", "zh": "📖 <b>功能</b>"},
     "start_footer": {
         "km": "💬 ចុចប៊ូតុងខាងក្រោមដើម្បីប្រើប្រាស់!",
@@ -1336,6 +1347,59 @@ def set_manual_qr(file_id, note=None):
         return cfg
 
 
+# ------------------------------------------------------------------
+# BANNER (ដូច DZ Store) — Admin upload រូបភាព 1 សន្លឹក ធ្វើជា Banner លើផ្នែក
+# ស្វាគមន៍ (/start) និង Banner លើកបញ្ជីទំនិញ (ហាង) ដាច់ដោយឡែកពីគ្នា
+# ------------------------------------------------------------------
+BANNER_KEYS = ("welcome", "shop")
+
+
+def load_banner_config():
+    return _load(BANNER_CONFIG_FILE, {"welcome_file_id": None, "shop_file_id": None})
+
+
+def save_banner_config(d):
+    _save(BANNER_CONFIG_FILE, d)
+
+
+def get_banner(key):
+    """key: 'welcome' (/start) ឬ 'shop' (បញ្ជីទំនិញ) → Telegram file_id ឬ None"""
+    if key not in BANNER_KEYS:
+        return None
+    cfg = load_banner_config()
+    return cfg.get(f"{key}_file_id")
+
+
+def set_banner(key, file_id):
+    if key not in BANNER_KEYS:
+        return
+    with _lock:
+        cfg = load_banner_config()
+        cfg[f"{key}_file_id"] = file_id
+        save_banner_config(cfg)
+        return cfg
+
+
+def send_with_banner(chat_id, banner_key, text, reply_markup=None):
+    """ផ្ញើ Banner រូបភាព (បើ admin បានកំណត់) ដោយដាក់ text ជា caption ដូច DZ Store —
+    បើគ្មាន Banner ត្រូវផ្ញើជា Text ធម្មតា។ Caption Telegram កំណត់អតិបរមា 1024 តួ —
+    បើ text វែងជាងនេះ ផ្ញើ Banner ដាច់ដោយឡែក រួចបន្តជា Text message វិញ ដើម្បីកុំឲ្យខូច format។"""
+    banner_file_id = get_banner(banner_key)
+    if not banner_file_id:
+        return bot.send_message(chat_id, text, reply_markup=reply_markup)
+    if len(text) <= 1000:
+        try:
+            return bot.send_photo(chat_id, banner_file_id, caption=text, reply_markup=reply_markup)
+        except Exception as e:
+            print(f"[send_with_banner] send_photo caption failed, fallback to text: {e}", flush=True)
+    # Text វែងពេក ឬ send_photo caption បរាជ័យ → ផ្ញើ Banner ដាច់ដោយឡែក រួច Text ដដែលខាងក្រោម
+    try:
+        bot.send_photo(chat_id, banner_file_id)
+    except Exception as e:
+        print(f"[send_with_banner] send_photo failed: {e}", flush=True)
+    return bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+
 # --- បិទ/បើក វិធីទូទាត់ ---
 PAYMENT_METHOD_KEYS = ("bakong", "aba", "manual")
 
@@ -2285,6 +2349,23 @@ def qty_pick_kb(uid, key, qty, max_qty, unit_price):
     return kb
 
 
+def _edit_or_resend_shop(call, uid, page):
+    """បង្ហាញបញ្ជីទំនិញ (Banner + Caption ដូច DZ Store បើ admin បានកំណត់ Banner ហាង) —
+    ព្យាយាម edit សារដើមជាមុនសិន (caption បើសារដើមជារូបភាព Banner, ឬ text បើសារធម្មតា);
+    បើ edit មិនកើត (ឧ. ប្តូររវាង Banner<->Text) ផ្ញើសារថ្មីជំនួសវិញ។"""
+    chat_id = call.message.chat.id
+    text = shop_list_text(uid, page)
+    kb = products_kb(uid, page)
+    has_photo = bool(getattr(call.message, "photo", None))
+    try:
+        if has_photo:
+            bot.edit_message_caption(caption=text, chat_id=chat_id, message_id=call.message.message_id, reply_markup=kb)
+        else:
+            bot.edit_message_text(text, chat_id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        send_with_banner(chat_id, "shop", text, reply_markup=kb)
+
+
 def _safe_edit_or_send(call, text, reply_markup):
     """ព្យាយាម edit សារដើម (menu_shop list) ជាអត្ថបទថ្មី — បើ edit មិនកើត (ឧ. សារដើម
     ជារូបភាព ដែល Telegram មិនអនុញ្ញាតឲ្យប្តូរទៅជាអត្ថបទបានទេ) នោះផ្ញើសារថ្មីជំនួសវិញ"""
@@ -2325,24 +2406,30 @@ def show_product_detail(call, product_key):
         bot.answer_callback_query(call.id, t(uid, "product_invalid"), show_alert=True)
         return
 
-    icon = resolve_icon(p.get("icon", "📦"))
     description = (p.get("description") or "").strip()
     group_items = _group_products(products, product_key)
 
     total_sold = sum(int(gp.get("sold") or 0) for _, gp in group_items)
-    if any(gp.get("delivery_type") == "email" for _, gp in group_items):
+    is_email = any(gp.get("delivery_type") == "email" for _, gp in group_items)
+    if is_email:
         stock_line = "📧 Delivery: Email"
         left = None
+        all_oos = False
     else:
         if len(group_items) == 1:
             left = stock_count(product_key)
         else:
             left = sum(max(0, stock_count(k)) for k, _ in group_items)
         stock_line = f"📦 ស្តុកមាន: <b>{left}</b>"
+        all_oos = left <= 0
+
+    # ទោះ icon/product មាន Premium Emoji កំណត់ក៏ដោយ បើអស់ស្តុកទាំងស្រុង ត្រូវប្តូរទៅ ❌
+    # ជំនួសវិញ ដើម្បីកុំឲ្យមើលទៅហាក់ដូចជានៅមានលក់ (ដូចលេចឡើងជា Premium Emoji ភ្លឺៗ)
+    icon = "❌" if all_oos else resolve_icon(p.get("icon", "📦"))
 
     title = (p.get("group_title") or p.get("brand") or p.get("name") or product_key).strip()
     lines = [
-        f"{icon} <b>{html.escape(title.upper())}</b>",
+        f"{icon} <b>{html.escape(title.upper())}</b>" + (" • អស់ស្តុក" if all_oos else ""),
         "",
         stock_line,
         f"📊 លក់រួច: <b>{total_sold}</b>",
@@ -2450,6 +2537,7 @@ ADMIN_BTN_BROADCAST = "📢 ផ្ញើសារទៅគ្រប់គ្ន�
 ADMIN_BTN_EMOJI = "🎭 Setup Emoji"
 ADMIN_BTN_SETQR = "🖼 កំណត់ QR ទូទាត់ដោយដៃ"
 ADMIN_BTN_SETNOTIFY = "🔔 កំណត់ Channel ជូនដំណឹង"
+ADMIN_BTN_SETBANNER = "🎨 កំណត់ Banner ហាង"
 
 
 def reply_kb_for(uid):
@@ -2458,10 +2546,10 @@ def reply_kb_for(uid):
     ប្រើ kbtn() ជំនួស string ធម្មតា ដើម្បីអាចដាក់ពណ៌ (Bot API 9.4)។"""
     lang = get_user_lang(uid)
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(kbtn(btn_label("shop", lang), style="success"))
-    kb.add(kbtn(btn_label("deposit", lang), style="success"), kbtn(btn_label("wallet", lang), style="primary"))
-    kb.add(kbtn(btn_label("orders", lang), style="primary"), kbtn(btn_label("profile", lang), style="primary"))
-    kb.add(kbtn(btn_label("help", lang), style="primary"), kbtn(btn_label("lang", lang), style="primary"))
+    kb.add(kbtn(btn_label("shop", lang), style="success"), kbtn(btn_label("profile", lang), style="primary"))
+    kb.add(kbtn(btn_label("wallet", lang), style="primary"), kbtn(btn_label("orders", lang), style="primary"))
+    kb.add(kbtn(btn_label("help", lang), style="primary"))
+    kb.add(kbtn(btn_label("lang", lang), style="primary"))
     if is_admin(uid):
         kb.add(kbtn(ADMIN_BTN_STATS, style="primary"), kbtn(ADMIN_BTN_ADDPRODUCT, style="success"))
         kb.add(kbtn(ADMIN_BTN_ADDSTOCK, style="success"), kbtn(ADMIN_BTN_DELSTOCK, style="danger"))
@@ -2469,7 +2557,7 @@ def reply_kb_for(uid):
         kb.add(kbtn(ADMIN_BTN_MSGUSER, style="primary"), kbtn(ADMIN_BTN_BROADCAST, style="primary"))
         kb.add(kbtn(ADMIN_BTN_FINDUSER, style="primary"), kbtn(ADMIN_BTN_ADDBALANCE, style="success"))
         kb.add(kbtn(ADMIN_BTN_EMOJI, style="primary"), kbtn(ADMIN_BTN_SETQR, style="primary"))
-        kb.add(kbtn(ADMIN_BTN_SETNOTIFY, style="primary"))
+        kb.add(kbtn(ADMIN_BTN_SETNOTIFY, style="primary"), kbtn(ADMIN_BTN_SETBANNER, style="primary"))
     return kb
 
 
@@ -2500,22 +2588,20 @@ def cmd_start(message):
     u = get_user(uid)
     username = getattr(message.from_user, "username", None)
     username_line = f"@{username}" if username else t(uid, "account_username_none")
-    feature_lines = "\n".join(f"├ {btn_label(k, lang)}" for k in ("shop", "wallet", "deposit", "orders", "profile"))
-    feature_lines += f"\n└ {btn_label('help', lang)}"
+    total_users = len(load_users())
+    total_orders = len(load_orders())
     text = (
-        f"{t(uid, 'start_greeting', name=first_name, store=STORE_NAME)}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"{t(uid, 'start_name_line', name=first_name)}\n\n"
         f"{t(uid, 'account_info_header')}\n"
         f"├ ID: <code>{uid}</code>\n"
         f"├ Username: {username_line}\n"
         f"└ {t(uid, 'balance_word')}: ${u['balance']:.2f}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"{t(uid, 'features_header')}\n"
-        f"{feature_lines}\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"{t(uid, 'account_stats_header')}\n"
+        f"├ {t(uid, 'orders_total_word')}: {total_orders}\n"
+        f"└ {t(uid, 'users_total_word')}: {total_users}\n\n"
         f"{t(uid, 'start_footer')}"
     )
-    bot.send_message(message.chat.id, text, reply_markup=reply_kb_for(uid))
+    send_with_banner(message.chat.id, "welcome", text, reply_markup=reply_kb_for(uid))
 
 
 @bot.message_handler(commands=["language", "lang"])
@@ -2559,7 +2645,7 @@ def cmd_orders(message):
 @bot.message_handler(func=lambda m: is_btn(m.text, "shop"))
 def reply_shop(message):
     uid = message.from_user.id
-    bot.send_message(message.chat.id, shop_list_text(uid), reply_markup=products_kb(uid, 0))
+    send_with_banner(message.chat.id, "shop", shop_list_text(uid), reply_markup=products_kb(uid, 0))
 
 
 @bot.message_handler(func=lambda m: is_btn(m.text, "wallet"))
@@ -2569,7 +2655,7 @@ def reply_wallet(message):
     bot.send_message(
         message.chat.id,
         t(uid, "wallet_current", balance=u["balance"], orders=u.get("orders", 0))
-        + "\n\n💡 ដាក់លុយ: ចុច <b>➕ ដាក់លុយដោយដៃ</b>",
+        + "\n\n💡 ដាក់លុយ: វាយ <b>/deposit</b>",
     )
 
 
@@ -3035,7 +3121,7 @@ def reply_admin_emoji(message):
 # ------------------------------------------------------------------
 # CALLBACK HANDLERS
 # ------------------------------------------------------------------
-@bot.callback_query_handler(func=lambda c: not c.data.startswith("emoji_"))
+@bot.callback_query_handler(func=lambda c: not c.data.startswith("emoji_") and not c.data.startswith("setbanner_") and not c.data.startswith("delbanner_") and not c.data.startswith("addp_") and not c.data.startswith("addpg_"))
 def callback_router(call):
     data = call.data
     uid = call.from_user.id
@@ -3046,12 +3132,7 @@ def callback_router(call):
             bot.answer_callback_query(call.id)
         except Exception:
             pass
-        try:
-            bot.edit_message_text(
-                shop_list_text(uid), chat_id, call.message.message_id, reply_markup=products_kb(uid, 0),
-            )
-        except Exception:
-            bot.send_message(chat_id, shop_list_text(uid), reply_markup=products_kb(uid, 0))
+        _edit_or_resend_shop(call, uid, 0)
 
     elif data.startswith("shoppage_"):
         try:
@@ -3062,12 +3143,7 @@ def callback_router(call):
             page = int(data.split("_", 1)[1])
         except Exception:
             page = 0
-        try:
-            bot.edit_message_text(
-                shop_list_text(uid), chat_id, call.message.message_id, reply_markup=products_kb(uid, page),
-            )
-        except Exception:
-            bot.send_message(chat_id, shop_list_text(uid), reply_markup=products_kb(uid, page))
+        _edit_or_resend_shop(call, uid, page)
 
     elif data == "menu_wallet":
         u = get_user(uid)
@@ -3941,15 +4017,206 @@ def unique_key(base_key, products):
     return f"{base_key}_{i}"
 
 
+def _existing_group_choices():
+    """ត្រឡប់ dict {group_key: group_title} នៃ App ណាដែលមាន Plan-group រួចហើយ (ចាំបាច់
+    សម្រាប់ ➕ បន្ថែម Plan ថ្មីទៅ App ចាស់)"""
+    products = load_products()
+    groups = {}
+    for _, p in products.items():
+        g = (p.get("group") or "").strip()
+        if g and g not in groups:
+            groups[g] = p.get("group_title") or g
+    return groups
+
+
+def addproduct_entry_kb():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(pbtn("🆕 App ថ្មី (Plan តែមួយ)", callback_data="addp_single", style="success"))
+    kb.add(pbtn("📦 App ថ្មី (មាន Plan ច្រើន ដូច 6month/1year)", callback_data="addp_group_new", style="primary"))
+    if _existing_group_choices():
+        kb.add(pbtn("➕ បន្ថែម Plan ទៅ App ដែលមានស្រាប់", callback_data="addp_group_add", style="primary"))
+    return kb
+
+
 @bot.message_handler(commands=["addproduct"])
 def cmd_addproduct(message):
     if not is_admin(message.from_user.id):
         return
-    msg = bot.send_message(
+    bot.send_message(
         message.chat.id,
-        "🆕 <b>បន្ថែម Product ថ្មី</b>\n\n1️⃣ សូមវាយ <b>ឈ្មោះ Product</b> ឧ. <code>Disney+ 1 Month</code>",
+        "🆕 <b>បន្ថែម Product</b>\n\n"
+        "ជ្រើសរើសប្រភេទ Product ដែលចង់បន្ថែម៖\n\n"
+        "├ <b>App ថ្មី (Plan តែមួយ)</b> — App ធម្មតា មិនចែក Plan/រយៈពេល\n"
+        "├ <b>App ថ្មី (Plan ច្រើន)</b> — ដូច ALIGHT MOTION ដែលមាន Plan 6month/1year ជាដើម ដែល user "
+        "ចុចមើល App ម្តង នឹងឃើញ Plan ទាំងអស់ឲ្យជ្រើសរើសក្នុងទំព័រតែមួយ\n"
+        "└ <b>បន្ថែម Plan ថ្មី</b> — បន្ថែម Plan ថ្មី (ឧ. Lifetime) ទៅ App ដែលមាន Plan ស្រាប់ រកឃើញលើ",
+        reply_markup=addproduct_entry_kb(),
     )
-    bot.register_next_step_handler(msg, addproduct_step_name)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("addp_") or c.data.startswith("addpg_"))
+def callback_addproduct_entry(call):
+    if not is_admin(call.from_user.id):
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    chat_id = call.message.chat.id
+    data = call.data
+
+    if data == "addp_single":
+        msg = bot.send_message(chat_id, "1️⃣ សូមវាយ <b>ឈ្មោះ Product</b> ឧ. <code>Disney+ 1 Month</code>")
+        bot.register_next_step_handler(msg, addproduct_step_name)
+
+    elif data == "addp_group_new":
+        msg = bot.send_message(
+            chat_id,
+            "1️⃣ សូមវាយ <b>ឈ្មោះ App</b> (បង្ហាញជា header ធំ ពេល user ចុចមើល) ឧ. <code>ALIGHT MOTION</code>",
+        )
+        bot.register_next_step_handler(msg, addproduct_group_step_title)
+
+    elif data == "addp_group_add":
+        groups = _existing_group_choices()
+        if not groups:
+            bot.send_message(
+                chat_id,
+                "⚠️ មិនទាន់មាន App ណាមួយកំណត់ជា Plan-group ទេ សូមប្រើ '📦 App ថ្មី (មាន Plan ច្រើន)' ជំនួសវិញ",
+            )
+            return
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for g, title in groups.items():
+            kb.add(pbtn(title, callback_data=f"addpg_{g}", style="primary"))
+        bot.send_message(chat_id, "សូមជ្រើសរើស App ដែលចង់បន្ថែម Plan ថ្មី:", reply_markup=kb)
+
+    elif data.startswith("addpg_"):
+        group = data[len("addpg_"):]
+        products = load_products()
+        template = None
+        group_title = group
+        for _, p in products.items():
+            if (p.get("group") or "").strip() == group:
+                template = p
+                group_title = p.get("group_title") or group
+                break
+        if not template:
+            bot.send_message(chat_id, "❌ រកមិនឃើញ App នេះទេ។")
+            return
+        msg = bot.send_message(
+            chat_id,
+            f"➕ <b>បន្ថែម Plan ថ្មីទៅ {html.escape(group_title)}</b>\n\n"
+            f"សូមវាយ <b>ឈ្មោះ Plan</b> (ឧ. <code>1year</code>, <code>Lifetime</code>):",
+        )
+        bot.register_next_step_handler(msg, addproduct_group_add_step_plan, group, group_title, template)
+
+
+def addproduct_group_add_step_plan(message, group, group_title, template):
+    if not is_admin(message.from_user.id):
+        return
+    plan = message.text.strip()
+    if not plan:
+        msg = bot.reply_to(message, "❌ សូមវាយឈ្មោះ Plan សូមព្យាយាមម្តងទៀត:")
+        bot.register_next_step_handler(msg, addproduct_group_add_step_plan, group, group_title, template)
+        return
+    msg = bot.reply_to(message, "សូមវាយ <b>តម្លៃ</b> (ជាលេខ, USD) ឧ. <code>2.5</code>")
+    bot.register_next_step_handler(msg, addproduct_group_add_step_price, group, group_title, template, plan)
+
+
+def addproduct_group_add_step_price(message, group, group_title, template, plan):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        price = float(message.text.strip())
+    except ValueError:
+        msg = bot.reply_to(message, "❌ តម្លៃត្រូវជាលេខ (ឧ. 6 ឬ 2.5) សូមវាយម្តងទៀត:")
+        bot.register_next_step_handler(msg, addproduct_group_add_step_price, group, group_title, template, plan)
+        return
+    msg = bot.reply_to(
+        message,
+        "សូមជ្រើសរើស <b>របៀបប្រគល់ (Delivery)</b> សម្រាប់ Plan នេះ:\n\n"
+        "<b>1</b> — 📦 Stock file (auto)\n<b>2</b> — 📧 Email (admin ដាក់ដោយដៃ)\n\nសូមវាយ <code>1</code> ឬ <code>2</code>:",
+    )
+    bot.register_next_step_handler(msg, addproduct_group_add_step_delivery, group, group_title, template, plan, price)
+
+
+def addproduct_group_add_step_delivery(message, group, group_title, template, plan, price):
+    if not is_admin(message.from_user.id):
+        return
+    choice = message.text.strip()
+    if choice not in ("1", "2"):
+        msg = bot.reply_to(message, "❌ សូមវាយ <code>1</code> ឬ <code>2</code> តែប៉ុណ្ណោះ:")
+        bot.register_next_step_handler(
+            msg, addproduct_group_add_step_delivery, group, group_title, template, plan, price,
+        )
+        return
+    delivery_type = "stock" if choice == "1" else "email"
+    products = load_products()
+    name = f"{group_title} {plan}"
+    key = unique_key(slugify_key(name), products)
+    products[key] = {
+        "name": name,
+        "price": price,
+        "icon": template.get("icon", "📦"),
+        "delivery_type": delivery_type,
+        "photo_file_id": template.get("photo_file_id"),
+        "description": template.get("description", ""),
+        "group": group,
+        "group_title": group_title,
+        "plan": plan,
+    }
+    save_products(products)
+    if delivery_type == "stock":
+        if not os.path.exists(stock_path(key)):
+            open(stock_path(key), "w").close()
+        extra_hint = f"👉 ឥឡូវចុចប៊ូតុង 📥 Stock ថ្មី ដើម្បីបញ្ចូល account ចូល stock (key: <code>{key}</code>)"
+    else:
+        extra_hint = "ℹ️ Plan នេះប្រើ Email delivery — admin ត្រូវដាក់ Premium ដោយដៃ ពេល user ទិញ។"
+    bot.send_message(
+        message.chat.id,
+        f"✅ <b>Plan ថ្មីបន្ថែមរួចរាល់!</b>\n\n"
+        f"{template.get('icon', '📦')} {group_title} — {plan}\n"
+        f"🔑 key: <code>{key}</code>\n💵 តម្លៃ: ${price:.2f}\n\n{extra_hint}",
+    )
+
+
+def addproduct_group_step_title(message):
+    if not is_admin(message.from_user.id):
+        return
+    group_title = message.text.strip()
+    if not group_title:
+        msg = bot.reply_to(message, "❌ ឈ្មោះមិនត្រឹមត្រូវ សូមវាយម្តងទៀត:")
+        bot.register_next_step_handler(msg, addproduct_group_step_title)
+        return
+    group = slugify_key(group_title)
+    msg = bot.reply_to(
+        message,
+        "2️⃣ សូមវាយ <b>ឈ្មោះ Plan</b> ដំបូង (ឧ. <code>6month</code>, <code>1year</code>) — "
+        "អាចបន្ថែម Plan ផ្សេងទៀតលើ App តែមួយនេះនៅពេលក្រោយបានតាម '➕ បន្ថែម Plan ទៅ App ដែលមានស្រាប់'៖",
+    )
+    bot.register_next_step_handler(msg, addproduct_group_step_plan, group, group_title)
+
+
+def addproduct_group_step_plan(message, group, group_title):
+    if not is_admin(message.from_user.id):
+        return
+    plan = message.text.strip()
+    if not plan:
+        msg = bot.reply_to(message, "❌ សូមវាយឈ្មោះ Plan សូមព្យាយាមម្តងទៀត:")
+        bot.register_next_step_handler(msg, addproduct_group_step_plan, group, group_title)
+        return
+    name = f"{group_title} {plan}"
+    products = load_products()
+    key = unique_key(slugify_key(name), products)
+    msg = bot.reply_to(
+        message,
+        f"🔑 key auto-generate: <code>{key}</code>\n\n"
+        f"3️⃣ សូមវាយ <b>តម្លៃ</b> (ជាលេខ, USD) ឧ. <code>2.5</code>",
+    )
+    bot.register_next_step_handler(msg, addproduct_step_price, key, name, group, group_title, plan)
 
 
 def addproduct_step_name(message):
@@ -3967,26 +4234,26 @@ def addproduct_step_name(message):
         f"🔑 key auto-generate: <code>{key}</code>\n\n"
         f"2️⃣ សូមវាយ <b>តម្លៃ</b> (ជាលេខ, USD) ឧ. <code>6</code>",
     )
-    bot.register_next_step_handler(msg, addproduct_step_price, key, name)
+    bot.register_next_step_handler(msg, addproduct_step_price, key, name, None, None, None)
 
 
-def addproduct_step_price(message, key, name):
+def addproduct_step_price(message, key, name, group=None, group_title=None, plan=None):
     if not is_admin(message.from_user.id):
         return
     try:
         price = float(message.text.strip())
     except ValueError:
         msg = bot.reply_to(message, "❌ តម្លៃត្រូវជាលេខ (ឧ. 6 ឬ 6.5) សូមវាយម្តងទៀត:")
-        bot.register_next_step_handler(msg, addproduct_step_price, key, name)
+        bot.register_next_step_handler(msg, addproduct_step_price, key, name, group, group_title, plan)
         return
     msg = bot.reply_to(
         message,
-        "3️⃣ សូមផ្ញើ <b>icon/emoji</b> សម្រាប់ app នេះ (ឧ. 🎬)\nឬវាយ <code>skip</code> ដើម្បីប្រើ 📦 លំនាំដើម",
+        "សូមផ្ញើ <b>icon/emoji</b> សម្រាប់ app នេះ (ឧ. 🎬)\nឬវាយ <code>skip</code> ដើម្បីប្រើ 📦 លំនាំដើម",
     )
-    bot.register_next_step_handler(msg, addproduct_step_icon, key, name, price)
+    bot.register_next_step_handler(msg, addproduct_step_icon, key, name, price, group, group_title, plan)
 
 
-def addproduct_step_icon(message, key, name, price):
+def addproduct_step_icon(message, key, name, price, group=None, group_title=None, plan=None):
     if not is_admin(message.from_user.id):
         return
     icon = message.text.strip()
@@ -3994,33 +4261,37 @@ def addproduct_step_icon(message, key, name, price):
         icon = "📦"
     msg = bot.reply_to(
         message,
-        "4️⃣ សូមជ្រើសរើស <b>របៀបប្រគល់ (Delivery)</b> សម្រាប់ product នេះ:\n\n"
+        "សូមជ្រើសរើស <b>របៀបប្រគល់ (Delivery)</b> សម្រាប់ product នេះ:\n\n"
         "<b>1</b> — 📦 Stock file (auto) — bot ប្រគល់ account ពី stock .txt ភ្លាមៗ ពេល user ទិញ\n"
         "<b>2</b> — 📧 Email (admin ដាក់ដោយដៃ) — user ផ្ញើ email គេផ្ទាល់មកឲ្យ bot, "
         "អ្នកដាក់ Premium/Invite ចូល email នោះផ្ទាល់ រួចចុច '✅ រួចរាល់' ដើម្បីជូនដំណឹង user\n\n"
         "សូមវាយ <code>1</code> ឬ <code>2</code>:",
     )
-    bot.register_next_step_handler(msg, addproduct_step_delivery, key, name, price, icon)
+    bot.register_next_step_handler(msg, addproduct_step_delivery, key, name, price, icon, group, group_title, plan)
 
 
-def addproduct_step_delivery(message, key, name, price, icon):
+def addproduct_step_delivery(message, key, name, price, icon, group=None, group_title=None, plan=None):
     if not is_admin(message.from_user.id):
         return
     choice = message.text.strip()
     if choice not in ("1", "2"):
         msg = bot.reply_to(message, "❌ សូមវាយ <code>1</code> ឬ <code>2</code> តែប៉ុណ្ណោះ:")
-        bot.register_next_step_handler(msg, addproduct_step_delivery, key, name, price, icon)
+        bot.register_next_step_handler(
+            msg, addproduct_step_delivery, key, name, price, icon, group, group_title, plan,
+        )
         return
     delivery_type = "stock" if choice == "1" else "email"
     msg = bot.reply_to(
         message,
-        "5️⃣ សូមផ្ញើ <b>រូបភាព (Photo)</b> សម្រាប់ product នេះ (បង្ហាញឲ្យ user ឃើញពេលចុចមើល)\n"
+        "សូមផ្ញើ <b>រូបភាព (Photo)</b> សម្រាប់ product នេះ (បង្ហាញឲ្យ user ឃើញពេលចុចមើល)\n"
         "ឬវាយ <code>skip</code> ដើម្បីរំលង (គ្មានរូបភាព):",
     )
-    bot.register_next_step_handler(msg, addproduct_step_photo, key, name, price, icon, delivery_type)
+    bot.register_next_step_handler(
+        msg, addproduct_step_photo, key, name, price, icon, delivery_type, group, group_title, plan,
+    )
 
 
-def addproduct_step_photo(message, key, name, price, icon, delivery_type):
+def addproduct_step_photo(message, key, name, price, icon, delivery_type, group=None, group_title=None, plan=None):
     if not is_admin(message.from_user.id):
         return
     photo_file_id = None
@@ -4033,17 +4304,24 @@ def addproduct_step_photo(message, key, name, price, icon, delivery_type):
             message,
             "❌ សូមផ្ញើជា <b>រូបភាព (Photo)</b> ឬវាយ <code>skip</code> ដើម្បីរំលង សូមព្យាយាមម្តងទៀត:",
         )
-        bot.register_next_step_handler(msg, addproduct_step_photo, key, name, price, icon, delivery_type)
+        bot.register_next_step_handler(
+            msg, addproduct_step_photo, key, name, price, icon, delivery_type, group, group_title, plan,
+        )
         return
     msg = bot.send_message(
         message.chat.id,
-        "6️⃣ សូមវាយ <b>ការពិពណ៌នា (Description)</b> សម្រាប់ product នេះ (បង្ហាញឲ្យ user ឃើញ)\n"
+        "សូមវាយ <b>ការពិពណ៌នា (Description)</b> សម្រាប់ product នេះ (បង្ហាញឲ្យ user ឃើញ)\n"
         "ឬវាយ <code>skip</code> ដើម្បីរំលង (គ្មាន description):",
     )
-    bot.register_next_step_handler(msg, addproduct_step_description, key, name, price, icon, delivery_type, photo_file_id)
+    bot.register_next_step_handler(
+        msg, addproduct_step_description, key, name, price, icon, delivery_type, photo_file_id,
+        group, group_title, plan,
+    )
 
 
-def addproduct_step_description(message, key, name, price, icon, delivery_type, photo_file_id):
+def addproduct_step_description(
+    message, key, name, price, icon, delivery_type, photo_file_id, group=None, group_title=None, plan=None,
+):
     if not is_admin(message.from_user.id):
         return
     text = (message.text or "").strip()
@@ -4061,6 +4339,10 @@ def addproduct_step_description(message, key, name, price, icon, delivery_type, 
         "photo_file_id": photo_file_id,
         "description": description,
     }
+    if group:
+        products[key]["group"] = group
+        products[key]["group_title"] = group_title
+        products[key]["plan"] = plan
     save_products(products)
     if delivery_type == "stock":
         if not os.path.exists(stock_path(key)):
@@ -4075,9 +4357,11 @@ def addproduct_step_description(message, key, name, price, icon, delivery_type, 
         )
         delivery_label = "📧 Email (Admin ដាក់ដោយដៃ)"
 
+    plan_line = f"🧩 Plan-group: <b>{html.escape(group_title)}</b> • Plan: <b>{html.escape(plan)}</b>\n" if group else ""
     summary = (
         f"✅ <b>Product បន្ថែមរួចរាល់!</b>\n\n"
         f"{icon} {name}\n"
+        f"{plan_line}"
         f"🔑 key: <code>{key}</code>\n"
         f"💵 តម្លៃ: ${price:.2f}\n"
         f"📮 Delivery: {delivery_label}\n"
@@ -4626,6 +4910,95 @@ def admin_setnotify_step(message):
         add_notify_chat_id(chat_id)
         bot.send_message(message.chat.id, f"✅ បានបន្ថែម <code>{chat_id}</code> ជាកន្លែងជូនដំណឹងរួចរាល់!\n\n{_notify_list_text()}")
 
+
+# ------------------------------------------------------------------
+# SET BANNER (ដូច DZ Store) — Admin upload រូបភាព Banner សម្រាប់ /start និង/ឬ ហាង
+# ------------------------------------------------------------------
+def _banner_status_text():
+    w = "✅ មានរួចហើយ" if get_banner("welcome") else "⚠️ មិនទាន់កំណត់"
+    s = "✅ មានរួចហើយ" if get_banner("shop") else "⚠️ មិនទាន់កំណត់"
+    return f"├ 🏠 Banner ស្វាគមន៍ (/start): {w}\n└ 🛍️ Banner បញ្ជីទំនិញ (ហាង): {s}"
+
+
+def _banner_pick_kb():
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(pbtn("🏠 Banner ស្វាគមន៍ (/start)", callback_data="setbanner_welcome", style="primary"))
+    kb.add(pbtn("🛍️ Banner បញ្ជីទំនិញ (ហាង)", callback_data="setbanner_shop", style="primary"))
+    if get_banner("welcome"):
+        kb.add(pbtn("🗑 លុប Banner ស្វាគមន៍", callback_data="delbanner_welcome", style="danger"))
+    if get_banner("shop"):
+        kb.add(pbtn("🗑 លុប Banner ហាង", callback_data="delbanner_shop", style="danger"))
+    return kb
+
+
+@bot.message_handler(func=lambda m: norm_label(m.text) == norm_label(ADMIN_BTN_SETBANNER))
+def reply_admin_setbanner(message):
+    if not is_admin(message.from_user.id):
+        return
+    _start_setbanner_flow(message.chat.id)
+
+
+@bot.message_handler(commands=["setbanner"])
+def cmd_setbanner(message):
+    if not is_admin(message.from_user.id):
+        return
+    _start_setbanner_flow(message.chat.id)
+
+
+def _start_setbanner_flow(chat_id):
+    bot.send_message(
+        chat_id,
+        f"🎨 <b>កំណត់ Banner ហាង</b>\n{_banner_status_text()}\n\n"
+        f"ជ្រើសរើសថា Banner ណាមួយចង់ដាក់/ប្តូររូបភាព (ដូចរូបគំរូ DZ Store ដែលមាន Logo + ឈ្មោះហាង):",
+        reply_markup=_banner_pick_kb(),
+    )
+
+
+def _prompt_banner_photo(chat_id, key, label):
+    msg = bot.send_message(
+        chat_id,
+        f"📸 សូមផ្ញើជា <b>រូបភាព (Photo)</b> ដែលចង់ប្រើជា {label}\n"
+        f"(ណែនាំ៖ រូបផ្ដេក អត្រា ១៦:៩ ដូចរូបគំរូ — Telegram នឹងបង្ហាប់រូបភាព ដូច្នេះកុំដាក់អក្សរតូចពេក)",
+    )
+    bot.register_next_step_handler(msg, admin_setbanner_photo_step, key, label)
+
+
+def admin_setbanner_photo_step(message, key, label):
+    if not is_admin(message.from_user.id):
+        return
+    if not message.photo:
+        msg = bot.send_message(message.chat.id, f"❌ សូមផ្ញើជា <b>រូបភាព (Photo)</b> មិនមែនឯកសារ/អត្ថបទទេ សូមផ្ញើម្តងទៀត:")
+        bot.register_next_step_handler(msg, admin_setbanner_photo_step, key, label)
+        return
+    file_id = message.photo[-1].file_id
+    set_banner(key, file_id)
+    bot.send_message(message.chat.id, f"✅ បានកំណត់ {label} រួចរាល់! សាកល្បង {'ចុច /start' if key == 'welcome' else 'ចុច 🛍️ ហាង'} មើលលទ្ធផល។")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("setbanner_") or c.data.startswith("delbanner_"))
+def callback_setbanner(call):
+    if not is_admin(call.from_user.id):
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+        return
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    data = call.data
+    chat_id = call.message.chat.id
+    if data == "setbanner_welcome":
+        _prompt_banner_photo(chat_id, "welcome", "Banner ស្វាគមន៍ (/start)")
+    elif data == "setbanner_shop":
+        _prompt_banner_photo(chat_id, "shop", "Banner បញ្ជីទំនិញ (ហាង)")
+    elif data == "delbanner_welcome":
+        set_banner("welcome", None)
+        bot.send_message(chat_id, "🗑 បានលុប Banner ស្វាគមន៍ហើយ — /start នឹងវិលទៅជា Text ធម្មតាវិញ។")
+    elif data == "delbanner_shop":
+        set_banner("shop", None)
+        bot.send_message(chat_id, "🗑 បានលុប Banner ហាងហើយ — ហាងនឹងវិលទៅជា Text ធម្មតាវិញ។")
 
 
 # ------------------------------------------------------------------
