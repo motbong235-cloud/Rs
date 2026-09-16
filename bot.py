@@ -1047,14 +1047,25 @@ bot.send_document = _patched_send_document
 
 def all_emoji_categories():
     """បញ្ជីពេញលេញសម្រាប់ setup: category base (✅❌🔙...) បូក icon របស់ផលិតផលនីមួយៗ
-    ដែលមានក្នុងហាង — ដូច្នេះ admin អាចដាក់ Premium Emoji ទៅ icon ផលិតផលនីមួយៗបានដែរ។"""
+    ដែលមានក្នុងហាង — ដូច្នេះ admin អាចដាក់ Premium Emoji ទៅ icon ផលិតផលនីមួយៗបានដែរ។
+    បើផលិតផលច្រើនជាង ១ ប្រើ icon glyph ដូចគ្នា (ឧ. ទាំង Netflix និង YouTube Premium ប្រើ 🎬)
+    ត្រូវបញ្ចូលឈ្មោះផលិតផលទាំងអស់នោះក្នុង label តែមួយ (មិនមែនតែឈ្មោះទីមួយទេ) — ព្រោះ glyph
+    តែមួយកំណត់ Premium Emoji បានតែម្តង ប៉ុន្តែអនុវត្តទៅគ្រប់ផលិតផលទាំងអស់ដែលប្រើ glyph នោះ
+    ដូច្នេះ admin ត្រូវឃើញឈ្មោះផលិតផលទាំងអស់ ដើម្បីដឹងថា glyph នេះគ្របដណ្តប់លើអ្វីខ្លះ។"""
     cats = list(EMOJI_CATEGORIES)
-    seen = {g for g, _ in cats}
+    base_glyphs = {g for g, _ in EMOJI_CATEGORIES}
+    icon_products = {}
     for key, p in load_products().items():
         icon = resolve_icon(p.get("icon", "📦"))
-        if icon and icon not in seen:
-            cats.append((icon, f"{icon} Icon ផលិតផល: {p.get('name', key)}"))
-            seen.add(icon)
+        if not icon or icon in base_glyphs:
+            continue
+        icon_products.setdefault(icon, []).append(p.get("name") or key)
+    for icon, names in icon_products.items():
+        uniq_names = list(dict.fromkeys(names))  # ដក ឈ្មោះស្ទួន ចេញ រក្សាលំដាប់
+        names_str = ", ".join(uniq_names[:4])
+        if len(uniq_names) > 4:
+            names_str += f" +{len(uniq_names) - 4}"
+        cats.append((icon, f"{icon} Icon ផលិតផល: {names_str}"))
     return cats
 
 
@@ -2410,18 +2421,22 @@ def show_product_detail(call, product_key):
     group_items = _group_products(products, product_key)
 
     total_sold = sum(int(gp.get("sold") or 0) for _, gp in group_items)
-    is_email = any(gp.get("delivery_type") == "email" for _, gp in group_items)
-    if is_email:
+    stock_items = [(k, gp) for k, gp in group_items if gp.get("delivery_type") != "email"]
+    email_items = [(k, gp) for k, gp in group_items if gp.get("delivery_type") == "email"]
+
+    if not stock_items:
+        # គ្រប់ Plan សុទ្ធតែជា Email — មិនកំណត់ស្តុក
         stock_line = "📧 Delivery: Email"
-        left = None
         all_oos = False
     else:
-        if len(group_items) == 1:
-            left = stock_count(product_key)
+        left = sum(max(0, stock_count(k)) for k, _ in stock_items)
+        if email_items:
+            # លាយគ្នា — មាន Plan ខ្លះជា Stock ខ្លះជា Email ក្នុង App តែមួយ — ត្រូវបង្ហាញទាំង ២
+            stock_line = f"📦 ស្តុកមាន (Plan ស្តុក): <b>{left}</b>\n📧 មាន Plan ខ្លះជា Email (មិនកំណត់)"
+            all_oos = False  # Email plan តែងតែទិញបាន គិតជា "នៅមានលក់" ជានិច្ច
         else:
-            left = sum(max(0, stock_count(k)) for k, _ in group_items)
-        stock_line = f"📦 ស្តុកមាន: <b>{left}</b>"
-        all_oos = left <= 0
+            stock_line = f"📦 ស្តុកមាន: <b>{left}</b>"
+            all_oos = left <= 0
 
     # ទោះ icon/product មាន Premium Emoji កំណត់ក៏ដោយ បើអស់ស្តុកទាំងស្រុង ត្រូវប្តូរទៅ ❌
     # ជំនួសវិញ ដើម្បីកុំឲ្យមើលទៅហាក់ដូចជានៅមានលក់ (ដូចលេចឡើងជា Premium Emoji ភ្លឺៗ)
