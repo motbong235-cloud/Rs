@@ -6,7 +6,7 @@ services:
   - type: web
     name: rs-premium-bot
     runtime: python
-    plan: free
+    plan: Starter
     region: singapore
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
