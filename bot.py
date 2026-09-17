@@ -1322,6 +1322,21 @@ def save_orders(d):
     _save(ORDERS_FILE, d)
 
 
+def record_order(uid, product_name, price, qty=1):
+    """បន្ថែម record ចូល orders.json (master log) — ប្រើដោយ /orders (ប្រវត្តិទិញផ្ទាល់ខ្លួន)
+    និង admin stats (ចំនួន Order សរុប)"""
+    with _lock:
+        orders = load_orders()
+        orders.append({
+            "uid": uid,
+            "product": product_name,
+            "price": price,
+            "qty": qty,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        save_orders(orders)
+
+
 # ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # MANUAL QR DEPOSIT (សម្រាប់ហាង/subscriber ដែលគ្មាន Bakong ID ផ្ទាល់ខ្លួន)
@@ -1416,11 +1431,15 @@ PAYMENT_METHOD_KEYS = ("bakong", "aba", "manual")
 
 
 def is_payment_method_enabled(method):
-    return True
+    cfg = load_payment_config()
+    return bool(cfg.get(f"{method}_enabled", True))
 
 
 def set_payment_method_enabled(method, enabled):
-    return
+    with _lock:
+        cfg = load_payment_config()
+        cfg[f"{method}_enabled"] = bool(enabled)
+        save_payment_config(cfg)
 
 
 
@@ -2181,14 +2200,26 @@ def _notify_deposit_already_pending(uid, chat_id, rec, call=None):
     bot.send_message(chat_id, text, reply_markup=kb)
 
 
-def poll_deposit(uid, chat_id, amount, reference, user_label=None, max_minutes=5, checker=None):
+def poll_deposit(uid, chat_id, amount, reference, user_label=None, max_minutes=5, checker=None, on_success=None):
     # NOTE: _clear_active_auto_deposit(uid) ត្រូវបានហៅនៅ finally ខាងក្រោមបំផុត
     # មិនថា deposit នេះជោគជ័យ ឬផុតកំណត់ ឬកើត exception ក៏ដោយ ដើម្បីអោយ user អាចបង្កើត QR ថ្មីបាន
+    #
+    # on_success (ស្រេចចិត្ត): បើផ្តល់ function មក ហៅ on_success() ជំនួសការបញ្ចូលលុយចូល
+    # Wallet លំនាំដើម — ប្រើសម្រាប់ '_start_buy_pay_method' (ទិញ product ដោយផ្ទាល់តាម
+    # KHQR/ABA គ្មានឆ្លងកាត់ Wallet ទាល់តែសោះ) ដែលចង់ចែក Stock ជូនភ្លាមៗ ជំនួសការបញ្ចូល
+    # ទឹកប្រាក់ចូល Wallet។
     try:
         checker = checker or camrapid_check
         deadline = time.time() + max_minutes * 60
         while time.time() < deadline:
             if checker(reference):
+                if on_success:
+                    try:
+                        on_success()
+                    except Exception as e:
+                        print(f"[poll_deposit] on_success failed: {e}", flush=True)
+                        notify_admin_error(f"poll_deposit on_success (uid={uid}, amount={amount})", e)
+                    return
                 new_balance = update_balance(uid, amount)
                 try:
                     bot.send_message(uid, t(uid, "auto_deposit_success", amount=amount, balance=new_balance, store=STORE_NAME))
@@ -2511,6 +2542,382 @@ def show_qty_picker(call, product_key, qty):
     _safe_edit_or_send(call, text, qty_pick_kb(uid, product_key, qty, max_qty, p["price"]))
 
 
+# ------------------------------------------------------------------
+# FULFILL ORDER (ចែក Stock ជូន User) — ប្រើរួមគ្នាដោយគ្រប់ផ្លូវទិញ (Wallet ផ្ទាល់,
+# KHQR deposit-for-purchase, ABA, Manual) បន្ទាប់ពីលុយត្រូវបានកាត់/បញ្ជាក់រួច
+# ------------------------------------------------------------------
+def fulfill_product_order(uid, chat_id, product_key, qty, amount_paid):
+    products = load_products()
+    p = products.get(product_key)
+    if not p:
+        update_balance(uid, amount_paid)
+        try:
+            bot.send_message(chat_id, "❌ Product នេះលែងមានទៀតហើយ — លុយត្រូវបានសងត្រឡប់ចូល Wallet វិញ។")
+        except Exception:
+            pass
+        return
+
+    items = pop_stock_items(product_key, qty)
+    got = len(items)
+    if got == 0:
+        update_balance(uid, amount_paid)
+        try:
+            bot.send_message(chat_id, t(uid, "stock_sold_out_retry_alert") + " — លុយត្រូវបានសងត្រឡប់ចូល Wallet វិញ។")
+        except Exception:
+            pass
+        return
+
+    refund = 0.0
+    if got < qty:
+        refund = round(amount_paid * (qty - got) / qty, 2)
+        if refund > 0:
+            update_balance(uid, refund)
+        amount_paid = round(amount_paid - refund, 2)
+
+    with _lock:
+        products = load_products()
+        if product_key in products:
+            products[product_key]["sold"] = int(products[product_key].get("sold") or 0) + got
+            save_products(products)
+        users = load_users()
+        u = users.get(str(uid))
+        if u:
+            u["orders"] = int(u.get("orders") or 0) + 1
+            save_users(users)
+
+    record_order(uid, p.get("name", product_key), amount_paid, got)
+
+    accounts_text = "\n".join(f"<code>{html.escape(it)}</code>" for it in items)
+    msg = t(uid, "purchase_success", name=p.get("name", product_key), qty=got, total=amount_paid, accounts=accounts_text)
+    if refund > 0:
+        msg += f"\n\n⚠️ ស្តុកមានតែ {got}/{qty} — ចំណែកខ្វះបានសងត្រឡប់ ${refund:.2f} ចូល Wallet វិញ។"
+    try:
+        bot.send_message(chat_id, msg)
+    except Exception as e:
+        print(f"[fulfill_product_order] send to user failed: {e}", flush=True)
+
+    notify_public(
+        f"🛒 <b>Order ថ្មី!</b>\n👤 {stored_user_label(uid)} (<code>{uid}</code>)\n"
+        f"🛍️ {p.get('name', product_key)} × {got}\n💵 ${amount_paid:.2f}"
+    )
+
+
+def start_product_payment(call, key, qty):
+    """ទិញភ្លាមៗពី Wallet (product ប្រភេទ Stock) — ចុច '✅ បង់ប្រាក់' ក្នុង Quantity
+    picker ឬចុច Plan ដោយផ្ទាល់ (qty=1) ក្នុងទំព័រ detail។"""
+    uid = call.from_user.id
+    chat_id = call.message.chat.id
+    products = load_products()
+    p = products.get(key)
+    if not p:
+        bot.answer_callback_query(call.id, t(uid, "product_invalid"), show_alert=True)
+        return
+
+    left = stock_count(key)
+    if left <= 0:
+        bot.answer_callback_query(call.id, t(uid, "out_of_stock_alert", name=p.get("name", key)), show_alert=True)
+        return
+    if qty > left:
+        bot.answer_callback_query(call.id, t(uid, "insufficient_stock_alert", left=left, qty=qty), show_alert=True)
+        return
+
+    price = float(p.get("price") or 0)
+    total = round(price * qty, 2)
+    ok, balance = try_deduct_balance(uid, total)
+    if not ok:
+        bot.answer_callback_query(call.id, t(uid, "balance_insufficient_alert", balance=balance, price=total), show_alert=True)
+        return
+
+    try:
+        bot.answer_callback_query(call.id, "✅ កំពុងដំណើរការ...")
+    except Exception:
+        pass
+    fulfill_product_order(uid, chat_id, key, qty, total)
+
+
+def show_pay_method_chooser(call, product_key, qty):
+    """បង្ហាញជម្រើសទូទាត់ (Wallet + Bakong/ABA/Manual QR បើ Admin បានកំណត់) — បើគ្មាន
+    វិធីផ្សេងក្រៅពី Wallet ត្រូវបានកំណត់ទេ ទិញពី Wallet ស្វ័យប្រវត្តិដូចមុន (មិនប៉ះពាល់ហាង
+    ដែលមិនទាន់កំណត់ Bakong/ABA/Manual QR)"""
+    uid = call.from_user.id
+    products = load_products()
+    p = products.get(product_key)
+    if not p:
+        bot.answer_callback_query(call.id, t(uid, "product_invalid"), show_alert=True)
+        return
+
+    alt_methods = []
+    if has_auto_bakong():
+        alt_methods.append(("bk", "⚡ Bakong KHQR"))
+    if has_aba_payway():
+        alt_methods.append(("aba", "💳 ABA PayWay"))
+    manual_qr_file_id, _ = get_manual_qr()
+    if is_payment_method_enabled("manual") and manual_qr_file_id:
+        alt_methods.append(("man", "🖼 ស្កេន QR ដោយដៃ"))
+
+    if not alt_methods:
+        start_product_payment(call, product_key, qty)
+        return
+
+    price = float(p.get("price") or 0)
+    total = round(price * qty, 2)
+    icon = resolve_icon(p.get("icon", "📦"))
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(pbtn(t(uid, "buy_from_wallet_btn", total=total), callback_data=f"qtyok_{product_key}_{qty}", style="success"))
+    for code, label in alt_methods:
+        kb.add(pbtn(label, callback_data=f"buypay_{code}_{product_key}_{qty}", style="primary"))
+    kb.add(pbtn(t(uid, "back_btn"), callback_data=f"buyopt_{product_key}", style="primary"))
+
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    text = f"{icon} <b>{html.escape(p.get('name', product_key))}</b> × {qty}\n💵 សរុប: ${total:.2f}\n\nសូមជ្រើសរើសវិធីទូទាត់:"
+    _safe_edit_or_send(call, text, kb)
+
+
+def _start_buy_pay_method(uid, chat_id, product_key, qty, amount, product_name, method, user_obj):
+    """ទិញ product ដោយផ្ទាល់តាម KHQR/ABA/Manual QR — មិនចាំបាច់ដាក់លុយចូល Wallet មុនទេ,
+    ទូទាត់ត្រូវនឹងតម្លៃ product ផ្ទាល់ រួច Bot ចែក Account ស្វ័យប្រវត្តិភ្លាមៗពេលបានទូទាត់
+    (Bakong/ABA — ស្វ័យប្រវត្តិទាំងស្រុងតាម on_success hook; Manual — Admin ✅/❌ ដូចទិញធម្មតា)"""
+    uid_for_lang = uid  # t() ត្រូវការ uid សម្រាប់ដឹងភាសា
+    left = stock_count(product_key)
+    if left <= 0:
+        bot.send_message(chat_id, t(uid_for_lang, "out_of_stock_alert", name=product_name))
+        return
+    if qty > left:
+        bot.send_message(chat_id, t(uid_for_lang, "insufficient_stock_alert", left=left, qty=qty))
+        return
+
+    if method == "bakong":
+        if _get_active_auto_deposit(uid):
+            _notify_deposit_already_pending(uid, chat_id, _get_active_auto_deposit(uid))
+            return
+        ref = f"RSPBUY{uid}{int(time.time())}"[:50]
+        ref_disp = f"BUY-{hashlib.md5(ref.encode()).hexdigest()[:8].upper()}"
+        data = camrapid_create(amount, ref)
+        if not data:
+            bot.send_message(chat_id, t(uid_for_lang, "qr_create_failed", detail=html.escape(_last_camrapid_error[:180])))
+            return
+        qr_string = data.get("qr_code", "")
+        payment_url = data.get("payment_url", "")
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        if payment_url:
+            kb.add(pbtn(t(uid_for_lang, "open_payment_page_btn"), url=payment_url, style="primary"))
+        caption = (
+            f"🛒 <b>ទិញ {html.escape(product_name)}</b>\n💵 ${amount:.2f}\n🔖 <code>{ref_disp}</code>\n\n"
+            f"ស្កេន QR ខាងលើ ដើម្បីទូទាត់ភ្លាមៗ — Account នឹងចែកជូនស្វ័យប្រវត្តិពេលបានទូទាត់។"
+        )
+        img_buf = build_qr_image(
+            qr_string, amount=amount, ref=ref_disp, label=product_name, subtitle=f"{STORE_NAME} · Bakong KHQR",
+        ) if qr_string else None
+        if img_buf:
+            bot.send_photo(chat_id, img_buf, caption=caption, reply_markup=kb)
+        elif payment_url:
+            bot.send_message(chat_id, caption, reply_markup=kb)
+        else:
+            bot.send_message(chat_id, t(uid_for_lang, "deposit_no_qr_data"))
+            return
+        if ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🆕 <b>QR ទិញ Product ត្រូវបានបង្កើត</b>\n"
+                    f"👤 {public_user_label(user_obj)} (<code>{uid}</code>)\n"
+                    f"🛍️ {html.escape(product_name)} × {qty}\n💵 ${amount:.2f}\n🔖 <code>{ref_disp}</code>\n💳 Bakong KHQR",
+                )
+            except Exception:
+                pass
+        _set_active_auto_deposit(uid, amount, ref)
+        th = threading.Thread(
+            target=poll_deposit,
+            args=(uid, chat_id, amount, ref, public_user_label(user_obj)),
+            kwargs={
+                "checker": camrapid_check,
+                "on_success": lambda: fulfill_product_order(uid, chat_id, product_key, qty, amount),
+            },
+            daemon=True,
+        )
+        th.start()
+
+    elif method == "aba":
+        if _get_active_auto_deposit(uid):
+            _notify_deposit_already_pending(uid, chat_id, _get_active_auto_deposit(uid))
+            return
+        username = public_user_label(user_obj).lstrip("@") or f"tg{uid}"
+        data = aba_generate_qr(amount, username)
+        if not data:
+            if ADMIN_ID:
+                try:
+                    bot.send_message(
+                        ADMIN_ID,
+                        f"⚠️ <b>ABA PayWay បរាជ័យ (ទិញ Product)</b>\n"
+                        f"👤 {public_user_label(user_obj)} (ID: <code>{uid}</code>) — ${amount:.2f}\n"
+                        f"🔎 <code>{html.escape(_last_aba_error[:500])}</code>",
+                    )
+                except Exception:
+                    pass
+            bot.send_message(chat_id, t(uid_for_lang, "qr_create_failed_aba", detail=html.escape(_last_aba_error[:180])))
+            return
+
+        payment_id = data.get("payment_id", "")
+        card_image = data.get("card_image") or data.get("qr_image")
+        pay_url = data.get("pay_url")
+        aba_app_link = _build_aba_app_deeplink(data)
+
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        if aba_app_link:
+            kb.add(pbtn(t(uid_for_lang, "open_aba_app_btn"), url=aba_app_link, style="primary"))
+        if pay_url:
+            kb.add(pbtn(t(uid_for_lang, "open_payment_page_btn"), url=pay_url, style="primary"))
+        caption = (
+            f"🛒 <b>ទិញ {html.escape(product_name)}</b>\n💵 ${amount:.2f}\n🔖 <code>{payment_id or '-'}</code>\n\n"
+            f"ស្កេន QR ខាងលើ ដើម្បីទូទាត់ភ្លាមៗ — Account នឹងចែកជូនស្វ័យប្រវត្តិពេលបានទូទាត់។"
+        )
+        if len(caption) > 1000:
+            caption = caption[:1000] + "…"
+
+        photo_payload = None
+        if card_image:
+            img_str = str(card_image).strip()
+            if img_str.lower().startswith(("http://", "https://")):
+                photo_payload = img_str
+            else:
+                try:
+                    b64_part = img_str.split(",", 1)[1] if img_str.startswith("data:") else img_str
+                    photo_payload = io.BytesIO(base64.b64decode(b64_part, validate=False))
+                    photo_payload.name = "aba_payment.png"
+                except Exception as e:
+                    print(f"[_start_buy_pay_method/aba] base64 decode failed: {e}", flush=True)
+                    photo_payload = None
+
+        sent_ok = False
+        if photo_payload:
+            try:
+                bot.send_photo(chat_id, photo_payload, caption=caption, reply_markup=kb)
+                sent_ok = True
+            except Exception as e:
+                print(f"[_start_buy_pay_method/aba] send_photo failed: {e}", flush=True)
+        if not sent_ok:
+            if pay_url:
+                bot.send_message(chat_id, caption, reply_markup=kb)
+            else:
+                bot.send_message(chat_id, t(uid_for_lang, "deposit_no_qr_data"))
+                return
+        if not payment_id:
+            bot.send_message(chat_id, t(uid_for_lang, "deposit_no_qr_data"))
+            return
+
+        if ADMIN_ID:
+            try:
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🆕 <b>QR ទិញ Product ត្រូវបានបង្កើត</b>\n"
+                    f"👤 {public_user_label(user_obj)} (ID: <code>{uid}</code>)\n"
+                    f"🛍️ {html.escape(product_name)} × {qty}\n💵 ${amount:.2f}\n🔖 <code>{payment_id}</code>\n💳 ABA PayWay",
+                )
+            except Exception:
+                pass
+        _set_active_auto_deposit(uid, amount, payment_id)
+        th = threading.Thread(
+            target=poll_deposit,
+            args=(uid, chat_id, amount, payment_id, public_user_label(user_obj)),
+            kwargs={
+                "checker": aba_check_payment,
+                "on_success": lambda: fulfill_product_order(uid, chat_id, product_key, qty, amount),
+            },
+            daemon=True,
+        )
+        th.start()
+
+    else:  # manual — QR ស្កេនដោយដៃ, admin ✅/❌ ដូចទិញធម្មតា (reuse pending_deposits + _handle_deposit_approve)
+        qr_file_id, qr_note = get_manual_qr()
+        if not qr_file_id:
+            bot.send_message(chat_id, t(uid_for_lang, "manual_no_qr_set"))
+            return
+        dep_id = f"BUY-{hashlib.md5(f'{uid}{time.time()}'.encode()).hexdigest()[:8].upper()}"
+        create_pending_deposit(dep_id, uid, amount, dep_id)
+        update_pending_deposit(dep_id, purpose="purchase", product_key=product_key, qty=qty)
+        note_line = f"\nℹ️ {html.escape(qr_note)}\n" if qr_note else ""
+        caption = (
+            f"🛒 <b>ទិញ {html.escape(product_name)}</b>\n💵 ${amount:.2f}\n🔖 <code>{dep_id}</code>{note_line}\n\n"
+            f"ស្កេន QR ខាងលើ ទូទាត់ រួចផ្ញើវិក័យប័ត្រ (screenshot) មកទីនេះ។"
+        )
+        msg = bot.send_photo(chat_id, qr_file_id, caption=caption)
+        bot.register_next_step_handler(msg, _deposit_receipt_step, uid, chat_id, amount, dep_id, user_obj)
+
+
+def start_buy_email_flow(call, product_key):
+    """ចាប់ផ្តើមទិញ product ប្រភេទ Email (Admin ដាក់ដោយដៃ) — សួរ Email មុននឹងកាត់លុយ។"""
+    uid = call.from_user.id
+    chat_id = call.message.chat.id
+    products = load_products()
+    p = products.get(product_key)
+    if not p:
+        bot.answer_callback_query(call.id, t(uid, "product_invalid"), show_alert=True)
+        return
+    price = float(p.get("price") or 0)
+    balance = get_user(uid)["balance"]
+    if balance < price:
+        bot.answer_callback_query(call.id, t(uid, "balance_insufficient_alert", balance=balance, price=price), show_alert=True)
+        return
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+    icon = resolve_icon(p.get("icon", "📦"))
+    msg = bot.send_message(chat_id, t(uid, "email_prompt", icon=icon, name=p.get("name", product_key), price=price))
+    bot.register_next_step_handler(msg, _email_buy_step, product_key)
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _email_buy_step(message, product_key):
+    uid = message.from_user.id
+    chat_id = message.chat.id
+    email = (message.text or "").strip()
+    if not _EMAIL_RE.match(email):
+        msg = bot.send_message(chat_id, t(uid, "email_invalid"))
+        bot.register_next_step_handler(msg, _email_buy_step, product_key)
+        return
+
+    products = load_products()
+    p = products.get(product_key)
+    if not p:
+        bot.send_message(chat_id, t(uid, "product_invalid"))
+        return
+    price = float(p.get("price") or 0)
+    ok, balance = try_deduct_balance(uid, price)
+    if not ok:
+        bot.send_message(chat_id, t(uid, "balance_insufficient_alert", balance=balance, price=price))
+        return
+
+    order_id = f"em_{uid}_{int(time.time())}"
+    create_pending_email_order(order_id, uid, product_key, p.get("name", product_key), price, email)
+    bot.send_message(chat_id, t(uid, "email_received", name=p.get("name", product_key), price=price, email=html.escape(email)))
+
+    if ADMIN_ID:
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            pbtn("✅ រួចរាល់", callback_data=f"emailordone_{order_id}", style="success"),
+            pbtn("❌ បដិសេធ", callback_data=f"emailorreject_{order_id}", style="danger"),
+        )
+        try:
+            bot.send_message(
+                ADMIN_ID,
+                f"📨 <b>ការកម្មង់ Email ថ្មី!</b>\n"
+                f"👤 {stored_user_label(uid)} (<code>{uid}</code>)\n"
+                f"🛍️ {html.escape(p.get('name', product_key))}\n"
+                f"💵 ${price:.2f}\n"
+                f"📧 Email: <code>{html.escape(email)}</code>\n\n"
+                f"👉 ដាក់ Premium ចូល Email នេះដោយដៃ រួចចុច '✅ រួចរាល់' ខាងក្រោម:",
+                reply_markup=kb,
+            )
+        except Exception as e:
+            print(f"[start_buy_email_flow] notify admin failed: {e}", flush=True)
+
+
 def deposit_amount_kb(uid):
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(pbtn("✏️ " + btn_label("deposit", get_user_lang(uid)).split(" ", 1)[-1], callback_data="dep_custom", style="primary"))
@@ -2534,6 +2941,53 @@ def _deposit_custom_amount_step(message, from_user):
         bot.send_message(chat_id, t(uid, "amount_below_min", min=DEPOSIT_MIN_AMOUNT))
         return
     handle_deposit(from_user.id, chat_id, amount, from_user)
+
+
+def handle_deposit(uid, chat_id, amount, user_obj, call=None):
+    """Dispatcher សម្រាប់ដាក់លុយ (Custom amount ពី /deposit) — ជ្រើសរើសវិធីទូទាត់សមស្រប
+    ស្វ័យប្រវត្តិ៖ បើមានវិធីបើកច្រើនជាង ១ បង្ហាញឲ្យ user ជ្រើសរើសផ្ទាល់, បើមានតែមួយ ហៅផ្ទាល់តែម្តង
+    (ដាក់លុយដោយដៃ '✍️' គ្មាន QR ត្រូវបានរួមបញ្ចូលជា fallback ចុងក្រោយជានិច្ច ព្រោះដំណើរការ
+    បានដោយគ្មានលក្ខខណ្ឌអី — មិនចាំបាច់កំណត់ QR/API key អ្វីទាំងអស់)"""
+    amount = round(float(amount), 2)
+    methods = []
+    if has_auto_bakong():
+        methods.append(("bkq", "⚡ Bakong KHQR (ស្កេនភ្លាមៗ)"))
+    if has_aba_payway():
+        methods.append(("aba", "💳 ABA PayWay"))
+    manual_qr_file_id, _ = get_manual_qr()
+    if is_payment_method_enabled("manual") and manual_qr_file_id:
+        methods.append(("man", "🖼 ស្កេន QR ដោយដៃ (Admin បញ្ជាក់)"))
+    methods.append(("hand", "✍️ ដាក់លុយដោយដៃ (គ្មាន QR)"))
+
+    if len(methods) == 1:
+        _dispatch_pay_method(methods[0][0], uid, chat_id, amount, user_obj, call)
+        return
+
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for code, label in methods:
+        kb.add(pbtn(label, callback_data=f"paym_{code}_{amount}", style="primary"))
+    if call:
+        try:
+            bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+    bot.send_message(chat_id, f"💳 <b>សូមជ្រើសរើសវិធីទូទាត់</b> សម្រាប់ ${amount:.2f}:", reply_markup=kb)
+
+
+def _dispatch_pay_method(code, uid, chat_id, amount, user_obj, call=None):
+    if code == "bkq":
+        _handle_deposit_auto(uid, chat_id, amount, user_obj, call=call)
+    elif code == "aba":
+        _handle_deposit_aba(uid, chat_id, amount, user_obj, call=call)
+    elif code == "man":
+        if call:
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+        handle_deposit_manual(uid, chat_id, amount, user_obj, call=call)
+    else:
+        handle_deposit_by_hand(uid, chat_id, amount, user_obj, call=call)
 
 
 # --- Reply Keyboard (ប៊ូតុងខាងក្រោមអេក្រង់, នៅជាប់ជានិច្ច) ---
@@ -3209,7 +3663,7 @@ def callback_router(call):
         if product and product.get("delivery_type") == "email":
             start_buy_email_flow(call, product_key)
         else:
-            start_product_payment(call, product_key, 1)
+            show_pay_method_chooser(call, product_key, 1)
 
     elif data.startswith("qtymin_"):
         key, qty_s = data[len("qtymin_"):].rsplit("_", 1)
@@ -3274,6 +3728,14 @@ def callback_router(call):
     elif data.startswith("paym_aba_"):
         amount = float(data[len("paym_aba_"):])
         _handle_deposit_aba(uid, chat_id, amount, call.from_user, call=call)
+
+    elif data.startswith("paym_man_"):
+        amount = float(data[len("paym_man_"):])
+        _dispatch_pay_method("man", uid, chat_id, amount, call.from_user, call=call)
+
+    elif data.startswith("paym_hand_"):
+        amount = float(data[len("paym_hand_"):])
+        _dispatch_pay_method("hand", uid, chat_id, amount, call.from_user, call=call)
 
     elif data.startswith("dep_"):
         amount = float(data.split("_", 1)[1])
@@ -4009,6 +4471,79 @@ def _handle_deposit_reject(call, dep_id):
     try:
         new_caption = (call.message.caption or "") + "\n\n❌ <b>បានបដិសេធ</b>"
         bot.edit_message_caption(new_caption, chat_id=call.message.chat.id, message_id=call.message.message_id)
+    except Exception:
+        pass
+
+
+def _handle_email_order_done(call, order_id):
+    """Admin ចុច '✅ រួចរាល់' បន្ទាប់ពីដាក់ Premium ចូល Email ដោយដៃរួច — ជូនដំណឹង user ស្វ័យប្រវត្តិ។"""
+    rec = get_pending_email_order(order_id)
+    if not rec:
+        bot.answer_callback_query(call.id, "❌ រកមិនឃើញការកម្មង់នេះទេ", show_alert=True)
+        return
+    if rec.get("status") != "pending":
+        bot.answer_callback_query(call.id, f"ℹ️ ការកម្មង់នេះត្រូវបានដោះស្រាយរួចហើយ ({rec.get('status')})", show_alert=True)
+        return
+    uid = rec["uid"]
+    update_pending_email_order(order_id, status="done")
+
+    # កត់ត្រា sold + orders count (ដូច fulfill_product_order ធ្វើសម្រាប់ product ប្រភេទ Stock)
+    with _lock:
+        products = load_products()
+        if rec["product_key"] in products:
+            products[rec["product_key"]]["sold"] = int(products[rec["product_key"]].get("sold") or 0) + 1
+            save_products(products)
+        users = load_users()
+        u = users.get(str(uid))
+        if u:
+            u["orders"] = int(u.get("orders") or 0) + 1
+            save_users(users)
+
+    record_order(uid, rec["product"], rec["price"], 1)
+
+    try:
+        bot.send_message(uid, t(uid, "email_order_done", name=rec["product"], email=html.escape(rec["email"]), store=STORE_NAME))
+    except Exception:
+        pass
+    notify_public(
+        f"🛒 <b>Order ថ្មី! (Email)</b>\n👤 {stored_user_label(uid)} (<code>{uid}</code>)\n"
+        f"🛍️ {rec['product']}\n💵 ${rec['price']:.2f}"
+    )
+    bot.answer_callback_query(call.id, "✅ បានជូនដំណឹងទៅ user រួចរាល់")
+    try:
+        new_caption = (call.message.caption or call.message.text or "") + "\n\n✅ <b>រួចរាល់</b>"
+        try:
+            bot.edit_message_caption(new_caption, chat_id=call.message.chat.id, message_id=call.message.message_id)
+        except Exception:
+            bot.edit_message_text(new_caption, call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+def _handle_email_order_reject(call, order_id):
+    """Admin ចុច '❌ បដិសេធ' — សងលុយត្រឡប់ចូល Wallet វិញ ហើយជូនដំណឹង user។"""
+    rec = get_pending_email_order(order_id)
+    if not rec:
+        bot.answer_callback_query(call.id, "❌ រកមិនឃើញការកម្មង់នេះទេ", show_alert=True)
+        return
+    if rec.get("status") != "pending":
+        bot.answer_callback_query(call.id, f"ℹ️ ការកម្មង់នេះត្រូវបានដោះស្រាយរួចហើយ ({rec.get('status')})", show_alert=True)
+        return
+    uid = rec["uid"]
+    price = rec["price"]
+    update_pending_email_order(order_id, status="rejected")
+    new_balance = update_balance(uid, price)
+    try:
+        bot.send_message(uid, t(uid, "email_order_rejected", name=rec["product"], email=html.escape(rec["email"]), price=price, balance=new_balance))
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id, "❌ បានបដិសេធ ហើយសងលុយត្រឡប់ចូល Wallet អ្នកទិញរួច")
+    try:
+        new_caption = (call.message.caption or call.message.text or "") + "\n\n❌ <b>បដិសេធ + សងលុយត្រឡប់</b>"
+        try:
+            bot.edit_message_caption(new_caption, chat_id=call.message.chat.id, message_id=call.message.message_id)
+        except Exception:
+            bot.edit_message_text(new_caption, call.message.chat.id, call.message.message_id)
     except Exception:
         pass
 
