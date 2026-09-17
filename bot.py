@@ -1891,6 +1891,20 @@ def aba_generate_qr(amount, username, _attempt=1):
     return None
 
 
+def _telegram_button_url(url):
+    """Telegram Bot API បដិសេធ inline button ណាមួយប្រើ URL scheme ក្រៅពី http(s)/tg —
+    (ឧ. custom app scheme ដូច abamobilebank://... ) ចោលភ្លាមៗជា 400 Bad Request
+    'Unsupported URL protocol' ដែលធ្វើឲ្យ error ដល់ user (bot មិនអាចផ្ញើសារបានទាល់តែសោះ)។
+    ត្រូវពិនិត្យ scheme ជាមុនសិន មុននឹងយក URL ណាមួយទៅដាក់ក្នុង pbtn(url=...) ជានិច្ច —
+    ត្រឡប់ url វិញបើសុវត្ថិភាព, ត្រឡប់ None បើមិនមែន (ដើម្បីរំលងកុំបញ្ចូល button នេះ)។"""
+    if not url:
+        return None
+    url = str(url).strip()
+    if url.lower().startswith(("http://", "https://", "tg://")):
+        return url
+    return None
+
+
 def _build_aba_app_deeplink(data):
     """បើ response ពី khmer-system.com មាន field deeplink ត្រង់ៗ (ឧ. abapay_deeplink /
     deeplink — ដូច ABA PayWay ផ្លូវការតែងតែផ្ញើមកជាមួយ qrString) ត្រឡប់វាភ្លាម។ បើគ្មាន
@@ -2763,7 +2777,7 @@ def _start_buy_pay_method(uid, chat_id, product_key, qty, amount, product_name, 
         payment_id = data.get("payment_id", "")
         card_image = data.get("card_image") or data.get("qr_image")
         pay_url = data.get("pay_url")
-        aba_app_link = _build_aba_app_deeplink(data)
+        aba_app_link = _telegram_button_url(_build_aba_app_deeplink(data))
 
         kb = types.InlineKeyboardMarkup(row_width=1)
         if aba_app_link:
@@ -4143,7 +4157,7 @@ def _handle_deposit_aba(uid, chat_id, amount, user_obj, call=None):
     payment_id = data.get("payment_id", "")
     card_image = data.get("card_image") or data.get("qr_image")
     pay_url = data.get("pay_url")
-    aba_app_link = _build_aba_app_deeplink(data)
+    aba_app_link = _telegram_button_url(_build_aba_app_deeplink(data))
 
     kb = types.InlineKeyboardMarkup(row_width=1)
     # ប៊ូតុងនេះចុចម្តង បើក ABA App ដោយផ្ទាល់ ត្រៀម QR នេះឲ្យស្កេនស្វ័យប្រវត្តិ
